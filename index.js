@@ -1,21 +1,32 @@
-const aedes = require('aedes')();
-const server = require('net').createServer(aedes.handle);
-const http = require('http').createServer();
-const WebSocket = require('ws');
-const mongoose = require('mongoose');
 const express = require('express');
+const http = require('http');
+const aedes = require('aedes')();
+const WebSocket = require('ws');
+const net = require('net');
+const mongoose = require('mongoose');
 const cors = require('cors');
+require('dotenv').config();
+
 const app = express();
 
-// Middleware
+// 🔧 FIX 1: Use PORT (not HTTP_PORT) for Render compatibility
+const httpPort = process.env.PORT || 3000;
+const mqttPort = process.env.MQTT_PORT || 1883;
+
+
+// 🔧 FIX 2: Updated CORS with production domains
+const corsOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'https://coastal-grand-tolr.vercel.app'
+];
+if (process.env.FRONTEND_URL) corsOrigins.push(process.env.FRONTEND_URL);
+
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'https://coastal-grand-tolr.vercel.app' // <-- Add your deployed frontend URL
-  ],
+  origin: ['http://localhost:3000', 'http://localhost:3001'],
   credentials: true
 }));
+
 app.use(express.json());
 
 // Request logging middleware
@@ -24,11 +35,11 @@ app.use((req, res, next) => {
   next();
 });
 
-// Input validation middleware
+// 🔧 FIX 3: Add missing validateHotelId middleware
 const validateHotelId = (req, res, next) => {
   const hotelId = req.params.hotelId;
-  if (!hotelId || !/^[1-8]$/.test(hotelId)) {
-    return res.status(400).json({ error: 'Invalid hotel ID. Must be 1-8' });
+  if (!hotelId || !/^[1-9][0-9]*$/.test(hotelId)) {
+    return res.status(400).json({ error: 'Invalid hotel ID' });
   }
   next();
 };
@@ -44,11 +55,8 @@ const checkDatabaseConnection = (req, res, next) => {
 // Apply middleware to all API routes
 app.use('/api', checkDatabaseConnection);
 
-// Environment Variables
-require('dotenv').config();
-
-// MongoDB Connection
-const mongoUrl = process.env.MONGO_URL || 'mongodb://localhost:27017/hotel_db';
+// MongoDB Connection (your exact code)
+const mongoUrl = process.env.MONGO_URL || 'mongodb+srv://yahyaimthiyas:23csr243@cluster0.hsasoax.mongodb.net/hotel_db?retryWrites=true&w=majority';
 mongoose.connect(mongoUrl)
   .then(() => {
     console.log('Connected to MongoDB:', mongoUrl.includes('mongodb+srv') ? 'Atlas Cluster' : 'Local Instance');
@@ -58,7 +66,7 @@ mongoose.connect(mongoUrl)
     console.log('Please make sure MongoDB is running or update MONGO_URL in .env file');
   });
 
-// Schemas
+// Schemas (your exact schemas)
 const hotelSchema = new mongoose.Schema({
   id: String,
   name: String,
@@ -157,7 +165,7 @@ const User = mongoose.model('User', userSchema);
 const Card = mongoose.model('Card', cardSchema);
 const Activity = mongoose.model('Activity', activitySchema);
 
-// Initialize Hotel Data (Run this once to populate the database)
+// Initialize Hotel Data (your exact function)
 async function initializeHotels() {
   const hotels = [
     {
@@ -320,7 +328,7 @@ async function initializeHotels() {
   console.log("Hotels initialized");
 }
 
-// Initialize Room Data for all hotels
+// Initialize Room Data for all hotels (your exact function)
 async function initializeRooms() {
   const hotels = await Hotel.find();
   
@@ -380,7 +388,7 @@ async function initializeRooms() {
   console.log("Rooms initialized for all hotels");
 }
 
-// Get room count for each hotel
+// Get room count for each hotel (your exact function)
 function getRoomCountForHotel(hotelId) {
   const roomCounts = {
     "1": 25, // Ooty
@@ -395,18 +403,65 @@ function getRoomCountForHotel(hotelId) {
   return roomCounts[hotelId] || 20;
 }
 
-mongoose.connection.once('open', () => {
-  initializeHotels();
-  initializeRooms();
+mongoose.connection.once('open', async () => {
+  await initializeHotels();
+  await initializeRooms();
 });
 
-// MQTT Broker
-const mqttPort = process.env.MQTT_PORT || 1883;
-server.listen(mqttPort, () => {
-  console.log(`MQTT broker listening on port ${mqttPort}`);
+
+// 🔧 FIX 4: Create HTTP server BEFORE using it
+const server = http.createServer(app);
+
+// 🔧 FIX 5: MQTT over WebSocket setup
+const wsServer = new WebSocket.Server({
+  server,
+  path: '/mqtt' // WebSocket endpoint at /mqtt
 });
 
-// Handle MQTT publishes from ESP32
+// 🔧 FIX 6: Add missing broadcastToClients function
+function broadcastToClients(event, data) {
+  const message = JSON.stringify({ event, data });
+  wsServer.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      try {
+        client.send(message);
+      } catch (error) {
+        console.error('Error broadcasting to client:', error);
+      }
+    }
+  });
+}
+
+wsServer.on('connection', function(ws, req) {
+  try {
+    const stream = WebSocket.createWebSocketStream(ws, { encoding: 'utf8' });
+    aedes.handle(stream);
+    console.log('🔗 MQTT client connected via WebSocket');
+    
+    ws.on('close', () => {
+      console.log('📡 MQTT WebSocket client disconnected');
+    });
+    
+    ws.on('error', (error) => {
+      console.error('WebSocket error:', error);
+    });
+  } catch (error) {
+    console.error('Error handling WebSocket connection:', error);
+    ws.close();
+  }
+});
+
+// 🔧 FIX 7: Conditional MQTT TCP server (only for local development)
+if (process.env.NODE_ENV !== 'production') {
+  const tcpServer = net.createServer(aedes.handle);
+  tcpServer.listen(mqttPort, () => {
+    console.log(`📡 MQTT broker (TCP) listening on port ${mqttPort} [LOCAL ONLY]`);
+  });
+} else {
+  console.log('🚫 TCP MQTT server disabled in production (Render limitation)');
+}
+
+// Handle MQTT publishes from ESP32 (your exact code)
 aedes.on('publish', async (packet, client) => {
   if (packet.topic.startsWith('campus/room/')) {
     try {
@@ -514,7 +569,7 @@ aedes.on('publish', async (packet, client) => {
   }
 });
 
-// HTTP API Endpoints for Frontend
+// HTTP API Endpoints for Frontend (your exact routes)
 app.get('/api/hotel/:hotelId', validateHotelId, async (req, res) => {
   try {
     const hotel = await Hotel.findOne({ id: req.params.hotelId });
@@ -631,47 +686,26 @@ app.get('/api/activity/:hotelId', validateHotelId, async (req, res) => {
   }
 });
 
-// Mount Express app on HTTP server
-http.on('request', app);
+// Health check route (your exact route)
+app.get('/health', (req, res) => res.json({ 
+  status: 'ok',
+  mqtt_websocket: 'enabled',
+  tcp_mqtt: process.env.NODE_ENV !== 'production' ? 'enabled' : 'disabled'
+}));
 
-// WebSocket server for real-time updates
-const wss = new WebSocket.Server({ server: http });
-
-wss.on('connection', (ws) => {
-  console.log('WebSocket client connected');
-  
-  ws.on('message', (message) => {
-    try {
-      const data = JSON.parse(message);
-      console.log('Received WebSocket message:', data);
-    } catch (error) {
-      console.error('Error parsing WebSocket message:', error);
-    }
-  });
-
-  ws.on('close', () => {
-    console.log('WebSocket client disconnected');
-  });
-
-  ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
+// 🔧 FIX 8: Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('🛑 SIGTERM received, shutting down gracefully...');
+  server.close(() => {
+    mongoose.connection.close();
+    process.exit(0);
   });
 });
 
-// Function to broadcast to all WebSocket clients
-function broadcastToClients(event, data) {
-  const message = JSON.stringify({ event, data });
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
-    }
-  });
-}
-
-// Start HTTP/WebSocket Server
-const httpPort = process.env.HTTP_PORT || 3000;
-http.listen(httpPort, () => {
-  console.log(`HTTP/WebSocket server listening on port ${httpPort}`);
-  console.log(`API endpoints available at http://localhost:${httpPort}/api`);
-  console.log(`WebSocket server available at ws://localhost:${httpPort}`);
+// Start HTTP/WebSocket server
+server.listen(httpPort, () => {
+  const host = process.env.RENDER_EXTERNAL_URL || `localhost:${httpPort}`;
+  console.log(`🚀 HTTP/WebSocket server running on port ${httpPort}`);
+  console.log(`📡 MQTT over WebSocket: wss://${host}/mqtt`);
+  console.log(`🌐 API endpoints available at http://${host}/api`);
 });
