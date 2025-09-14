@@ -56,6 +56,50 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
+// Server-Sent Events endpoint for real-time updates
+app.get('/api/events/:hotelId', (req, res) => {
+  const hotelId = req.params.hotelId;
+  
+  // Set SSE headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Cache-Control'
+  });
+
+  // Send initial connection message
+  res.write(`data: ${JSON.stringify({ 
+    event: 'connected', 
+    data: { message: 'SSE connected successfully', hotelId } 
+  })}\n\n`);
+
+  console.log(`📡 SSE client connected for hotel ${hotelId}`);
+
+  // Store client for broadcasting
+  const clientId = Date.now().toString();
+  if (!global.sseClients) {
+    global.sseClients = new Map();
+  }
+  global.sseClients.set(clientId, { res, hotelId });
+
+  // Handle client disconnect
+  req.on('close', () => {
+    console.log(`📡 SSE client disconnected for hotel ${hotelId}`);
+    if (global.sseClients) {
+      global.sseClients.delete(clientId);
+    }
+  });
+
+  req.on('error', (err) => {
+    console.error('SSE client error:', err);
+    if (global.sseClients) {
+      global.sseClients.delete(clientId);
+    }
+  });
+});
+
 // 🔧 FIX 3: Add missing validateHotelId middleware
 const validateHotelId = (req, res, next) => {
   const hotelId = req.params.hotelId;
@@ -483,23 +527,37 @@ frontendWsServer.on('error', (error) => {
 
 console.log('🔧 Frontend WebSocket server initialized on /ws endpoint');
 
-// 🔧 FIX 6: Updated broadcastToClients function for frontend clients
+// 🔧 FIX 6: Updated broadcastToClients function for frontend clients (WebSocket + SSE)
 function broadcastToClients(event, data) {
   const message = JSON.stringify({ event, data });
-  console.log(`Broadcasting to ${frontendClients.size} frontend clients:`, { event, data });
+  console.log(`Broadcasting to ${frontendClients.size} WebSocket clients and ${global.sseClients ? global.sseClients.size : 0} SSE clients:`, { event, data });
   
+  // Broadcast to WebSocket clients
   frontendClients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
       try {
         client.send(message);
       } catch (error) {
-        console.error('Error broadcasting to frontend client:', error);
+        console.error('Error broadcasting to WebSocket client:', error);
         frontendClients.delete(client);
       }
     } else {
       frontendClients.delete(client);
     }
   });
+
+  // Broadcast to SSE clients
+  if (global.sseClients) {
+    const sseMessage = `data: ${message}\n\n`;
+    global.sseClients.forEach((client, clientId) => {
+      try {
+        client.res.write(sseMessage);
+      } catch (error) {
+        console.error('Error broadcasting to SSE client:', error);
+        global.sseClients.delete(clientId);
+      }
+    });
+  }
 }
 
 mqttWsServer.on('connection', function(ws, req) {
