@@ -18,13 +18,16 @@ const mqttPort = process.env.MQTT_PORT || 1883;
 const corsOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
-  'https://coastal-grand-tolr.vercel.app'
+  'https://coastal-grand-tolr.vercel.app',
+  'https://coastal-grand-back.onrender.com'
 ];
 if (process.env.FRONTEND_URL) corsOrigins.push(process.env.FRONTEND_URL);
 
 app.use(cors({
   origin: corsOrigins,
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 
@@ -34,6 +37,23 @@ app.use(express.json());
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
+});
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'Server is running', 
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      api: '/api',
+      websocket: '/ws',
+      mqtt: '/mqtt'
+    }
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
 // 🔧 FIX 3: Add missing validateHotelId middleware
@@ -422,8 +442,11 @@ const mqttWsServer = new WebSocket.Server({
 // 🔧 Frontend WebSocket server for real-time updates
 const frontendWsServer = new WebSocket.Server({
   server,
-  path: '/ws' // WebSocket endpoint at /ws for frontend
-  // Temporarily disable CORS verification for debugging
+  path: '/ws',
+  verifyClient: (info) => {
+    console.log('WebSocket connection attempt from:', info.origin);
+    return true; // Allow all connections for now
+  }
 });
 
 // Store frontend clients separately
