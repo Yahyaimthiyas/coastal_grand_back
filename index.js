@@ -23,9 +23,10 @@ const corsOrigins = [
 if (process.env.FRONTEND_URL) corsOrigins.push(process.env.FRONTEND_URL);
 
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001'],
+  origin: corsOrigins,
   credentials: true
 }));
+
 
 app.use(express.json());
 
@@ -702,10 +703,13 @@ process.on('SIGTERM', () => {
   });
 });
 
-// Start HTTP/WebSocket server
 server.listen(httpPort, () => {
-  const host = process.env.RENDER_EXTERNAL_URL || `localhost:${httpPort}`;
+  const host = process.env.RENDER_EXTERNAL_URL || `http://localhost:${httpPort}`;
+  const wsUrl = host.startsWith('https://')
+    ? host.replace(/^https/, 'wss') + '/mqtt'
+    : host.replace(/^http/, 'ws') + '/mqtt';
+
   console.log(`🚀 HTTP/WebSocket server running on port ${httpPort}`);
-  console.log(`📡 MQTT over WebSocket: wss://${host}/mqtt`);
-  console.log(`🌐 API endpoints available at http://${host}/api`);
+  console.log(`📡 MQTT over WebSocket: ${wsUrl}`);
+  console.log(`🌐 API endpoints available at ${host}/api`);
 });
