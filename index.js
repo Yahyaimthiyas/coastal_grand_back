@@ -413,27 +413,63 @@ mongoose.connection.once('open', async () => {
 // 🔧 FIX 4: Create HTTP server BEFORE using it
 const server = http.createServer(app);
 
-// 🔧 FIX 5: MQTT over WebSocket setup
-const wsServer = new WebSocket.Server({
+// 🔧 FIX 5: MQTT over WebSocket setup (for ESP32)
+const mqttWsServer = new WebSocket.Server({
   server,
-  path: '/mqtt' // WebSocket endpoint at /mqtt
+  path: '/mqtt' // WebSocket endpoint at /mqtt for ESP32
 });
 
-// 🔧 FIX 6: Add missing broadcastToClients function
+// 🔧 Frontend WebSocket server for real-time updates
+const frontendWsServer = new WebSocket.Server({
+  server,
+  path: '/ws' // WebSocket endpoint at /ws for frontend
+});
+
+// Store frontend clients separately
+const frontendClients = new Set();
+
+// Handle frontend WebSocket connections
+frontendWsServer.on('connection', function(ws, req) {
+  console.log('🔗 Frontend client connected via WebSocket');
+  frontendClients.add(ws);
+  
+  // Send initial connection confirmation
+  ws.send(JSON.stringify({ 
+    event: 'connected', 
+    data: { message: 'WebSocket connected successfully' } 
+  }));
+  
+  ws.on('close', () => {
+    console.log('📡 Frontend WebSocket client disconnected');
+    frontendClients.delete(ws);
+  });
+  
+  ws.on('error', (error) => {
+    console.error('Frontend WebSocket error:', error);
+    frontendClients.delete(ws);
+  });
+});
+
+// 🔧 FIX 6: Updated broadcastToClients function for frontend clients
 function broadcastToClients(event, data) {
   const message = JSON.stringify({ event, data });
-  wsServer.clients.forEach((client) => {
+  console.log(`Broadcasting to ${frontendClients.size} frontend clients:`, { event, data });
+  
+  frontendClients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
       try {
         client.send(message);
       } catch (error) {
-        console.error('Error broadcasting to client:', error);
+        console.error('Error broadcasting to frontend client:', error);
+        frontendClients.delete(client);
       }
+    } else {
+      frontendClients.delete(client);
     }
   });
 }
 
-wsServer.on('connection', function(ws, req) {
+mqttWsServer.on('connection', function(ws, req) {
   try {
     const stream = WebSocket.createWebSocketStream(ws, { encoding: 'utf8' });
     aedes.handle(stream);
@@ -444,10 +480,10 @@ wsServer.on('connection', function(ws, req) {
     });
     
     ws.on('error', (error) => {
-      console.error('WebSocket error:', error);
+      console.error('MQTT WebSocket error:', error);
     });
   } catch (error) {
-    console.error('Error handling WebSocket connection:', error);
+    console.error('Error handling MQTT WebSocket connection:', error);
     ws.close();
   }
 });
