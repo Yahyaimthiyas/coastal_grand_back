@@ -60,44 +60,90 @@ app.get('/health', (req, res) => {
 app.get('/api/events/:hotelId', (req, res) => {
   const hotelId = req.params.hotelId;
   
-  // Set SSE headers
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Cache-Control'
-  });
-
-  // Send initial connection message
-  res.write(`data: ${JSON.stringify({ 
-    event: 'connected', 
-    data: { message: 'SSE connected successfully', hotelId } 
-  })}\n\n`);
-
-  console.log(`📡 SSE client connected for hotel ${hotelId}`);
-
-  // Store client for broadcasting
-  const clientId = Date.now().toString();
-  if (!global.sseClients) {
-    global.sseClients = new Map();
+  // Validate hotel ID
+  if (!hotelId || !/^[1-9][0-9]*$/.test(hotelId)) {
+    return res.status(400).json({ error: 'Invalid hotel ID' });
   }
-  global.sseClients.set(clientId, { res, hotelId });
+  
+  // Set SSE headers with better error handling
+  try {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Cache-Control',
+      'X-Accel-Buffering': 'no' // Disable nginx buffering
+    });
 
-  // Handle client disconnect
-  req.on('close', () => {
-    console.log(`📡 SSE client disconnected for hotel ${hotelId}`);
-    if (global.sseClients) {
-      global.sseClients.delete(clientId);
-    }
-  });
+    // Send initial connection message
+    const initialMessage = `data: ${JSON.stringify({ 
+      event: 'connected', 
+      data: { message: 'SSE connected successfully', hotelId } 
+    })}\n\n`;
+    
+    res.write(initialMessage);
+    console.log(`📡 SSE client connected for hotel ${hotelId}`);
 
-  req.on('error', (err) => {
-    console.error('SSE client error:', err);
-    if (global.sseClients) {
-      global.sseClients.delete(clientId);
+    // Store client for broadcasting
+    const clientId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    if (!global.sseClients) {
+      global.sseClients = new Map();
     }
-  });
+    global.sseClients.set(clientId, { res, hotelId, connected: true });
+
+    // Send periodic heartbeat to keep connection alive
+    const heartbeat = setInterval(() => {
+      try {
+        if (res.writable && global.sseClients && global.sseClients.has(clientId)) {
+          res.write(`: heartbeat\n\n`);
+        } else {
+          clearInterval(heartbeat);
+        }
+      } catch (error) {
+        console.error('Heartbeat error:', error.message);
+        clearInterval(heartbeat);
+        if (global.sseClients) {
+          global.sseClients.delete(clientId);
+        }
+      }
+    }, 30000); // Send heartbeat every 30 seconds
+
+    // Handle client disconnect
+    req.on('close', () => {
+      console.log(`📡 SSE client disconnected for hotel ${hotelId}`);
+      clearInterval(heartbeat);
+      if (global.sseClients) {
+        global.sseClients.delete(clientId);
+      }
+    });
+
+    req.on('error', (err) => {
+      // Only log non-ECONNRESET errors as they're normal for client disconnects
+      if (err.code !== 'ECONNRESET' && err.code !== 'EPIPE') {
+        console.error('SSE client error:', err.message);
+      }
+      clearInterval(heartbeat);
+      if (global.sseClients) {
+        global.sseClients.delete(clientId);
+      }
+    });
+
+    // Handle response errors
+    res.on('error', (err) => {
+      if (err.code !== 'ECONNRESET' && err.code !== 'EPIPE') {
+        console.error('SSE response error:', err.message);
+      }
+      clearInterval(heartbeat);
+      if (global.sseClients) {
+        global.sseClients.delete(clientId);
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error setting up SSE connection:', error.message);
+    res.status(500).json({ error: 'Failed to establish SSE connection' });
+  }
 });
 
 // 🔧 FIX 3: Add missing validateHotelId middleware
@@ -501,21 +547,64 @@ frontendWsServer.on('connection', function(ws, req) {
   const clientIP = req.socket.remoteAddress;
   const origin = req.headers.origin;
   console.log(`🔗 Frontend client connected via WebSocket from ${clientIP}, origin: ${origin}`);
+  
+  // Set connection timeout
+  const connectionTimeout = setTimeout(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close(1000, 'Connection timeout');
+    }
+  }, 300000); // 5 minutes timeout
+  
   frontendClients.add(ws);
   
-  // Send initial connection confirmation
-  ws.send(JSON.stringify({ 
-    event: 'connected', 
-    data: { message: 'WebSocket connected successfully' } 
-  }));
+  try {
+    // Send initial connection confirmation
+    ws.send(JSON.stringify({ 
+      event: 'connected', 
+      data: { message: 'WebSocket connected successfully' } 
+    }));
+  } catch (error) {
+    console.error('Error sending initial WebSocket message:', error.message);
+    frontendClients.delete(ws);
+    clearTimeout(connectionTimeout);
+    return;
+  }
+  
+  // Set up ping/pong for connection health
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.ping();
+      } catch (error) {
+        console.error('WebSocket ping error:', error.message);
+        clearInterval(pingInterval);
+        clearTimeout(connectionTimeout);
+        frontendClients.delete(ws);
+      }
+    } else {
+      clearInterval(pingInterval);
+    }
+  }, 30000); // Ping every 30 seconds
+  
+  ws.on('pong', () => {
+    // Reset timeout on pong response
+    clearTimeout(connectionTimeout);
+  });
   
   ws.on('close', (code, reason) => {
-    console.log(`📡 Frontend WebSocket client disconnected: ${code} ${reason}`);
+    console.log(`📡 Frontend WebSocket client disconnected: ${code} ${reason?.toString() || 'No reason'}`);
+    clearInterval(pingInterval);
+    clearTimeout(connectionTimeout);
     frontendClients.delete(ws);
   });
   
   ws.on('error', (error) => {
-    console.error('Frontend WebSocket error:', error);
+    // Only log non-connection reset errors
+    if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE') {
+      console.error('Frontend WebSocket error:', error.message);
+    }
+    clearInterval(pingInterval);
+    clearTimeout(connectionTimeout);
     frontendClients.delete(ws);
   });
 });
@@ -532,28 +621,52 @@ function broadcastToClients(event, data) {
   const message = JSON.stringify({ event, data });
   console.log(`Broadcasting to ${frontendClients.size} WebSocket clients and ${global.sseClients ? global.sseClients.size : 0} SSE clients:`, { event, data });
   
-  // Broadcast to WebSocket clients
+  // Broadcast to WebSocket clients with improved error handling
+  const disconnectedWsClients = [];
   frontendClients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
       try {
         client.send(message);
       } catch (error) {
-        console.error('Error broadcasting to WebSocket client:', error);
-        frontendClients.delete(client);
+        // Only log non-connection errors
+        if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE') {
+          console.error('Error broadcasting to WebSocket client:', error.message);
+        }
+        disconnectedWsClients.push(client);
       }
     } else {
-      frontendClients.delete(client);
+      disconnectedWsClients.push(client);
     }
   });
+  
+  // Clean up disconnected WebSocket clients
+  disconnectedWsClients.forEach(client => frontendClients.delete(client));
 
-  // Broadcast to SSE clients
-  if (global.sseClients) {
+  // Broadcast to SSE clients with improved error handling
+  if (global.sseClients && global.sseClients.size > 0) {
     const sseMessage = `data: ${message}\n\n`;
+    const disconnectedSseClients = [];
+    
     global.sseClients.forEach((client, clientId) => {
       try {
-        client.res.write(sseMessage);
+        // Check if response is still writable
+        if (client.res && client.res.writable && client.connected !== false) {
+          client.res.write(sseMessage);
+        } else {
+          disconnectedSseClients.push(clientId);
+        }
       } catch (error) {
-        console.error('Error broadcasting to SSE client:', error);
+        // Only log non-connection errors
+        if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE' && error.code !== 'ERR_STREAM_WRITE_AFTER_END') {
+          console.error('Error broadcasting to SSE client:', error.message);
+        }
+        disconnectedSseClients.push(clientId);
+      }
+    });
+    
+    // Clean up disconnected SSE clients
+    disconnectedSseClients.forEach(clientId => {
+      if (global.sseClients) {
         global.sseClients.delete(clientId);
       }
     });
