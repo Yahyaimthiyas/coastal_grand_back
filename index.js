@@ -9,7 +9,11 @@ const app = express();
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001'],
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'https://coastal-grand-tolr.vercel.app' // <-- Add your deployed frontend URL
+  ],
   credentials: true
 }));
 app.use(express.json());
