@@ -422,7 +422,23 @@ const mqttWsServer = new WebSocket.Server({
 // 🔧 Frontend WebSocket server for real-time updates
 const frontendWsServer = new WebSocket.Server({
   server,
-  path: '/ws' // WebSocket endpoint at /ws for frontend
+  path: '/ws', // WebSocket endpoint at /ws for frontend
+  verifyClient: (info) => {
+    // Allow connections from allowed origins
+    const origin = info.origin;
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'https://coastal-grand-tolr.vercel.app'
+    ];
+    
+    if (process.env.FRONTEND_URL) {
+      allowedOrigins.push(process.env.FRONTEND_URL);
+    }
+    
+    // Allow connections without origin (for testing) or from allowed origins
+    return !origin || allowedOrigins.includes(origin);
+  }
 });
 
 // Store frontend clients separately
@@ -430,7 +446,9 @@ const frontendClients = new Set();
 
 // Handle frontend WebSocket connections
 frontendWsServer.on('connection', function(ws, req) {
-  console.log('🔗 Frontend client connected via WebSocket');
+  const clientIP = req.socket.remoteAddress;
+  const origin = req.headers.origin;
+  console.log(`🔗 Frontend client connected via WebSocket from ${clientIP}, origin: ${origin}`);
   frontendClients.add(ws);
   
   // Send initial connection confirmation
@@ -439,8 +457,8 @@ frontendWsServer.on('connection', function(ws, req) {
     data: { message: 'WebSocket connected successfully' } 
   }));
   
-  ws.on('close', () => {
-    console.log('📡 Frontend WebSocket client disconnected');
+  ws.on('close', (code, reason) => {
+    console.log(`📡 Frontend WebSocket client disconnected: ${code} ${reason}`);
     frontendClients.delete(ws);
   });
   
@@ -449,6 +467,13 @@ frontendWsServer.on('connection', function(ws, req) {
     frontendClients.delete(ws);
   });
 });
+
+// Add error handling for WebSocket server
+frontendWsServer.on('error', (error) => {
+  console.error('Frontend WebSocket Server error:', error);
+});
+
+console.log('🔧 Frontend WebSocket server initialized on /ws endpoint');
 
 // 🔧 FIX 6: Updated broadcastToClients function for frontend clients
 function broadcastToClients(event, data) {
