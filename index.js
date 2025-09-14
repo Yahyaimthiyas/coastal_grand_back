@@ -422,23 +422,8 @@ const mqttWsServer = new WebSocket.Server({
 // 🔧 Frontend WebSocket server for real-time updates
 const frontendWsServer = new WebSocket.Server({
   server,
-  path: '/ws', // WebSocket endpoint at /ws for frontend
-  verifyClient: (info) => {
-    // Allow connections from allowed origins
-    const origin = info.origin;
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'https://coastal-grand-tolr.vercel.app'
-    ];
-    
-    if (process.env.FRONTEND_URL) {
-      allowedOrigins.push(process.env.FRONTEND_URL);
-    }
-    
-    // Allow connections without origin (for testing) or from allowed origins
-    return !origin || allowedOrigins.includes(origin);
-  }
+  path: '/ws' // WebSocket endpoint at /ws for frontend
+  // Temporarily disable CORS verification for debugging
 });
 
 // Store frontend clients separately
