@@ -687,6 +687,235 @@ app.get('/api/activity/:hotelId', validateHotelId, async (req, res) => {
   }
 });
 
+// ESP32 Data Handler - Direct HTTP endpoint for ESP32 communication
+app.post('/api/mqtt-data', async (req, res) => {
+  try {
+    const { topic, data } = req.body;
+    
+    if (!topic || !data) {
+      return res.status(400).json({ error: 'Missing topic or data' });
+    }
+
+    // Parse topic: campus/room/{building}/{floor}/{roomNum}/{type}
+    const topicParts = topic.split('/');
+    if (topicParts.length !== 6 || topicParts[0] !== 'campus' || topicParts[1] !== 'room') {
+      return res.status(400).json({ error: 'Invalid topic format' });
+    }
+
+    const [, , building, floor, roomNum, type] = topicParts;
+    
+    // Add room and hotelId to data
+    const processedData = {
+      ...data,
+      room: roomNum,
+      hotelId: floor
+    };
+
+    let newActivity = null;
+
+    if (type === 'attendance') {
+      await new Attendance(processedData).save();
+      console.log(`Saved attendance for room ${roomNum} in hotel ${processedData.hotelId}:`, processedData);
+
+      // Update room status
+      let update = {};
+      let hasMasterKeyUpdate = {};
+      if (processedData.check_in) {
+        const status = processedData.role === 'Maintenance' ? 'maintenance' : 'occupied';
+        update = {
+          status,
+          occupantType: processedData.role.toLowerCase(),
+          powerStatus: 'on',
+        };
+        if (processedData.role === 'Manager') {
+          hasMasterKeyUpdate = { hasMasterKey: true };
+        }
+      } else {
+        update = {
+          status: 'vacant',
+          occupantType: null,
+          powerStatus: 'off',
+        };
+        if (processedData.role === 'Manager') {
+          hasMasterKeyUpdate = { hasMasterKey: false };
+        }
+      }
+      const fullUpdate = { ...update, ...hasMasterKeyUpdate };
+      await Room.findOneAndUpdate(
+        { hotelId: processedData.hotelId, number: roomNum },
+        fullUpdate,
+        { upsert: true, new: true }
+      );
+      broadcastToClients(`roomUpdate:${processedData.hotelId}`, { roomNum, ...fullUpdate });
+
+      // Create activity
+      const activityType = processedData.check_in ? 'checkin' : 'checkout';
+      const action = `${processedData.role} checked ${processedData.check_in ? 'in' : 'out'} to Room ${processedData.room}`;
+      const time = processedData.check_in || processedData.check_out;
+      newActivity = {
+        hotelId: processedData.hotelId,
+        id: new Date().getTime().toString(),
+        type: activityType,
+        action,
+        user: processedData.role,
+        time,
+      };
+    } else if (type === 'alerts') {
+      await new Alert(processedData).save();
+      console.log(`Saved alert for room ${roomNum} in hotel ${processedData.hotelId}:`, processedData);
+
+      // Create activity
+      const activityType = 'security';
+      const action = `Alert: ${processedData.alert_message} for ${processedData.role} in Room ${processedData.room}`;
+      const time = processedData.triggered_at;
+      newActivity = {
+        hotelId: processedData.hotelId,
+        id: new Date().getTime().toString(),
+        type: activityType,
+        action,
+        user: 'System',
+        time,
+      };
+    } else if (type === 'denied_access') {
+      await new Denied(processedData).save();
+      console.log(`Saved denied access for room ${roomNum} in hotel ${processedData.hotelId}:`, processedData);
+
+      // Create activity
+      const action = `Denied access to ${processedData.role}: ${processedData.denial_reason} for Room ${processedData.room}`;
+      const time = processedData.attempted_at;
+      newActivity = {
+        hotelId: processedData.hotelId,
+        id: new Date().getTime().toString(),
+        type: 'security',
+        action,
+        user: processedData.role,
+        time,
+      };
+    }
+
+    if (newActivity) {
+      const savedActivity = await new Activity(newActivity).save();
+      broadcastToClients(`activityUpdate:${processedData.hotelId}`, savedActivity);
+    }
+
+    res.json({ success: true, message: 'Data processed successfully' });
+  } catch (error) {
+    console.error('Error processing ESP32 data:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Fallback MQTT simulation endpoint
+app.post('/api/simulate-mqtt', async (req, res) => {
+  try {
+    const { topic, payload } = req.body;
+    
+    if (!topic || !payload) {
+      return res.status(400).json({ error: 'Missing topic or payload' });
+    }
+
+    // Parse the payload as JSON
+    let data;
+    try {
+      data = typeof payload === 'string' ? JSON.parse(payload) : payload;
+    } catch (e) {
+      return res.status(400).json({ error: 'Invalid JSON payload' });
+    }
+
+    // Simulate the MQTT message processing
+    const topicParts = topic.split('/');
+    if (topicParts.length >= 6) {
+      const [, , building, floor, roomNum, type] = topicParts;
+      
+      data.room = roomNum;
+      data.hotelId = floor;
+
+      let newActivity = null;
+
+      if (type === 'attendance') {
+        await new Attendance(data).save();
+        console.log(`Simulated MQTT - Saved attendance for room ${roomNum}:`, data);
+        
+        // Update room status (same logic as MQTT handler)
+        let update = {};
+        if (data.check_in) {
+          const status = data.role === 'Maintenance' ? 'maintenance' : 'occupied';
+          update = {
+            status,
+            occupantType: data.role.toLowerCase(),
+            powerStatus: 'on',
+          };
+          if (data.role === 'Manager') {
+            update.hasMasterKey = true;
+          }
+        } else {
+          update = {
+            status: 'vacant',
+            occupantType: null,
+            powerStatus: 'off',
+          };
+          if (data.role === 'Manager') {
+            update.hasMasterKey = false;
+          }
+        }
+        
+        await Room.findOneAndUpdate(
+          { hotelId: data.hotelId, number: roomNum },
+          update,
+          { upsert: true, new: true }
+        );
+        broadcastToClients(`roomUpdate:${data.hotelId}`, { roomNum, ...update });
+
+        const activityType = data.check_in ? 'checkin' : 'checkout';
+        const action = `${data.role} checked ${data.check_in ? 'in' : 'out'} to Room ${data.room}`;
+        const time = data.check_in || data.check_out;
+        newActivity = {
+          hotelId: data.hotelId,
+          id: new Date().getTime().toString(),
+          type: activityType,
+          action,
+          user: data.role,
+          time,
+        };
+      } else if (type === 'alerts') {
+        await new Alert(data).save();
+        console.log(`Simulated MQTT - Saved alert for room ${roomNum}:`, data);
+        
+        newActivity = {
+          hotelId: data.hotelId,
+          id: new Date().getTime().toString(),
+          type: 'security',
+          action: `Alert: ${data.alert_message} for ${data.role} in Room ${data.room}`,
+          user: 'System',
+          time: data.triggered_at,
+        };
+      } else if (type === 'denied_access') {
+        await new Denied(data).save();
+        console.log(`Simulated MQTT - Saved denied access for room ${roomNum}:`, data);
+        
+        newActivity = {
+          hotelId: data.hotelId,
+          id: new Date().getTime().toString(),
+          type: 'security',
+          action: `Denied access to ${data.role}: ${data.denial_reason} for Room ${data.room}`,
+          user: data.role,
+          time: data.attempted_at,
+        };
+      }
+
+      if (newActivity) {
+        const savedActivity = await new Activity(newActivity).save();
+        broadcastToClients(`activityUpdate:${data.hotelId}`, savedActivity);
+      }
+    }
+
+    res.json({ success: true, message: 'MQTT simulation processed successfully' });
+  } catch (error) {
+    console.error('Error in MQTT simulation:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Health check route (your exact route)
 app.get('/health', (req, res) => res.json({ 
   status: 'ok',
